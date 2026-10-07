@@ -50,11 +50,7 @@ int main(void) {
 
   // result = BLB_TestSound();
 
-  if (result != 0) {
-    return 1;
-  }
-
-  return 0;
+  return result ? 1 : 0;
 }
 
 // #include "bulba/core/utils/config.h"
