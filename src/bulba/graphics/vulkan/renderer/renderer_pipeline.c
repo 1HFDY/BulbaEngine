@@ -1,0 +1,682 @@
+#include "bulba/core/render/shader.h"
+#include "bulba/graphics/vulkan/renderer.h"
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "basic2d_frag.h"
+#include "basic2d_vert.h"
+#include "basic3d_frag.h"
+#include "basic3d_vert.h"
+#include "shadow_vert.h"
+#include "text2d_frag.h"
+#include "text2d_vert.h"
+#include "text3d_frag.h"
+#include "text3d_vert.h"
+
+int create_render_pass(VULKAN *vulkan) {
+  VkAttachmentDescription color = {.format = vulkan->swapchain_format,
+                                   .samples = VK_SAMPLE_COUNT_1_BIT,
+                                   .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                   .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                                   .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                   .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                   .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                                   .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR};
+
+  VkAttachmentDescription depth = {.format = VK_FORMAT_D32_SFLOAT,
+                                   .samples = VK_SAMPLE_COUNT_1_BIT,
+                                   .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                   .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                   .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                   .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                   .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                                   .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+  VkAttachmentDescription attachments[] = {color, depth};
+
+  VkAttachmentReference color_ref = {.attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+
+  VkAttachmentReference depth_ref = {.attachment = 1, .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+  VkSubpassDescription subpass = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                  .colorAttachmentCount = 1,
+                                  .pColorAttachments = &color_ref,
+                                  .pDepthStencilAttachment = &depth_ref};
+
+  VkSubpassDependency dependency = {.srcSubpass = VK_SUBPASS_EXTERNAL,
+                                    .dstSubpass = 0,
+                                    .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                                    .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                                    .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT};
+
+  VkRenderPassCreateInfo info = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+                                 .attachmentCount = 2,
+                                 .pAttachments = attachments,
+                                 .subpassCount = 1,
+                                 .pSubpasses = &subpass,
+                                 .dependencyCount = 1,
+                                 .pDependencies = &dependency};
+
+  return vkCreateRenderPass(vulkan->device, &info, NULL, &vulkan->render_pass) == VK_SUCCESS ? 0 : -1;
+}
+
+VkShaderModule BLB_LoadShaderFromMemory(VULKAN *vulkan, const void *code, size_t size) {
+  if (!vulkan || !code || size == 0)
+    return VK_NULL_HANDLE;
+
+  if (size % sizeof(uint32_t) != 0)
+    return VK_NULL_HANDLE;
+
+  VkShaderModuleCreateInfo info = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = size, .pCode = (const uint32_t *)code};
+
+  VkShaderModule module = VK_NULL_HANDLE;
+
+  if (vkCreateShaderModule(vulkan->device, &info, NULL, &module) != VK_SUCCESS)
+    return VK_NULL_HANDLE;
+
+  return module;
+}
+
+static int create_basic_pipeline(VULKAN *vulkan, const void *vertex_code, size_t vertex_size, const void *fragment_code, size_t fragment_size,
+                                 VkDescriptorSetLayout light_layout, VkPipelineLayout *pipeline_layout, VkPipeline *pipeline, bool is_2d,
+                                 BLB_RenderMode mode, uint32_t depth_variant) {
+  VkShaderModule vert = BLB_LoadShaderFromMemory(vulkan, vertex_code, vertex_size);
+
+  VkShaderModule frag = BLB_LoadShaderFromMemory(vulkan, fragment_code, fragment_size);
+
+  if (!vert || !frag) {
+    if (vert)
+      vkDestroyShaderModule(vulkan->device, vert, NULL);
+
+    if (frag)
+      vkDestroyShaderModule(vulkan->device, frag, NULL);
+
+    return -1;
+  }
+
+  VkPipelineShaderStageCreateInfo stages[] = {
+      {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vert, .pName = "main"},
+      {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag, .pName = "main"}};
+
+  VkVertexInputBindingDescription binding = {.binding = 0, .stride = sizeof(VulkanVertex), .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
+
+  VkVertexInputAttributeDescription attributes[] = {
+      {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},
+      {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = sizeof(float) * 3},
+      {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = sizeof(float) * 7},
+      {.location = 3, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = sizeof(float) * 10}};
+
+  VkPipelineVertexInputStateCreateInfo vertex_input = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+                                                       .vertexBindingDescriptionCount = 1,
+                                                       .pVertexBindingDescriptions = &binding,
+                                                       .vertexAttributeDescriptionCount = 4,
+                                                       .pVertexAttributeDescriptions = attributes};
+
+  VkPipelineInputAssemblyStateCreateInfo assembly = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                                                     .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                                                     .primitiveRestartEnable = VK_FALSE};
+
+  VkPipelineViewportStateCreateInfo viewport = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+
+  VkPipelineRasterizationStateCreateInfo raster = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                                                   .depthClampEnable = VK_FALSE,
+                                                   .rasterizerDiscardEnable = VK_FALSE,
+                                                   .polygonMode = VK_POLYGON_MODE_FILL,
+                                                   .cullMode = VK_CULL_MODE_NONE,
+                                                   .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+                                                   .depthBiasEnable = VK_FALSE,
+                                                   .lineWidth = 1.0f};
+
+  VkPipelineMultisampleStateCreateInfo multisample = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                                                      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+
+  bool depth_test = depth_variant == 1u || depth_variant == 3u;
+  bool depth_write = depth_variant == 2u || depth_variant == 3u;
+
+  if (!is_2d && mode != BLB_RENDER_OPAQUE && depth_variant == 2u)
+    depth_write = true;
+
+  VkPipelineDepthStencilStateCreateInfo depth = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+                                                 .depthTestEnable = depth_test ? VK_TRUE : VK_FALSE,
+                                                 .depthWriteEnable = depth_write ? VK_TRUE : VK_FALSE,
+                                                 .depthCompareOp = depth_test ? VK_COMPARE_OP_LESS : VK_COMPARE_OP_ALWAYS,
+                                                 .depthBoundsTestEnable = VK_FALSE,
+                                                 .stencilTestEnable = VK_FALSE};
+
+  VkPipelineColorBlendAttachmentState blend_attachment = {
+      .blendEnable = mode == BLB_RENDER_OPAQUE ? VK_FALSE : VK_TRUE,
+      .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+      .dstColorBlendFactor = mode == BLB_RENDER_ADDITIVE ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+      .colorBlendOp = VK_BLEND_OP_ADD,
+      .srcAlphaBlendFactor = mode == BLB_RENDER_ADDITIVE ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE,
+      .dstAlphaBlendFactor = mode == BLB_RENDER_ADDITIVE ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+      .alphaBlendOp = VK_BLEND_OP_ADD,
+      .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT};
+
+  VkPipelineColorBlendStateCreateInfo blend = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &blend_attachment};
+
+  VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+
+  VkPipelineDynamicStateCreateInfo dynamic = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dynamic_states};
+
+  VkPushConstantRange push_constant = {.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       .offset = 0,
+                                       .size = is_2d ? sizeof(Vulkan2DPushConstants) : sizeof(VulkanLightingPushConstants)};
+
+  VkDescriptorSetLayout set_layouts[] = {light_layout, vulkan->material_descriptor_set_layout};
+
+  VkPipelineLayoutCreateInfo layout = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                       .setLayoutCount = 2,
+                                       .pSetLayouts = set_layouts,
+                                       .pushConstantRangeCount = 1,
+                                       .pPushConstantRanges = &push_constant};
+
+  if (vkCreatePipelineLayout(vulkan->device, &layout, NULL, pipeline_layout) != VK_SUCCESS) {
+    vkDestroyShaderModule(vulkan->device, vert, NULL);
+
+    vkDestroyShaderModule(vulkan->device, frag, NULL);
+
+    return -1;
+  }
+
+  VkGraphicsPipelineCreateInfo pipeline_info = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+                                                .stageCount = 2,
+                                                .pStages = stages,
+                                                .pVertexInputState = &vertex_input,
+                                                .pInputAssemblyState = &assembly,
+                                                .pViewportState = &viewport,
+                                                .pRasterizationState = &raster,
+                                                .pMultisampleState = &multisample,
+                                                .pDepthStencilState = &depth,
+                                                .pColorBlendState = &blend,
+                                                .pDynamicState = &dynamic,
+                                                .layout = *pipeline_layout,
+                                                .renderPass = vulkan->render_pass,
+                                                .subpass = 0};
+
+  VkResult result = vkCreateGraphicsPipelines(vulkan->device, VK_NULL_HANDLE, 1, &pipeline_info, NULL, pipeline);
+
+  vkDestroyShaderModule(vulkan->device, vert, NULL);
+  vkDestroyShaderModule(vulkan->device, frag, NULL);
+
+  if (result != VK_SUCCESS) {
+    vkDestroyPipelineLayout(vulkan->device, *pipeline_layout, NULL);
+
+    *pipeline_layout = VK_NULL_HANDLE;
+
+    return -1;
+  }
+
+  return 0;
+}
+
+static void destroy_custom_pipeline_entry(VULKAN *vulkan, VULKAN_CustomPipeline *entry) {
+  if (!vulkan || !entry || !entry->used)
+    return;
+
+  if (entry->pipeline != VK_NULL_HANDLE)
+    vkDestroyPipeline(vulkan->device, entry->pipeline, NULL);
+  if (entry->layout != VK_NULL_HANDLE)
+    vkDestroyPipelineLayout(vulkan->device, entry->layout, NULL);
+  if (entry->shader)
+    BLB_Shader_Release((BLB_ShaderProgram *)entry->shader);
+
+  *entry = (VULKAN_CustomPipeline){0};
+}
+
+void VULKAN_DestroyCustomPipelines(VULKAN *vulkan) {
+  if (!vulkan || vulkan->device == VK_NULL_HANDLE)
+    return;
+
+  for (size_t i = 0; i < VULKAN_MAX_CUSTOM_PIPELINES; ++i)
+    destroy_custom_pipeline_entry(vulkan, &vulkan->custom_pipelines[i]);
+}
+
+static VULKAN_CustomPipeline *find_custom_pipeline(VULKAN *vulkan, const BLB_ShaderProgram *shader, bool is_2d, BLB_RenderMode mode,
+                                                   uint32_t depth_variant) {
+  for (size_t i = 0; i < VULKAN_MAX_CUSTOM_PIPELINES; ++i) {
+    VULKAN_CustomPipeline *entry = &vulkan->custom_pipelines[i];
+    if (!entry->used)
+      continue;
+    if (entry->shader == shader && entry->is_2d == is_2d && entry->render_mode == mode && entry->depth_variant == depth_variant)
+      return entry;
+  }
+  return NULL;
+}
+
+static VULKAN_CustomPipeline *find_custom_pipeline_slot(VULKAN *vulkan) {
+  VULKAN_CustomPipeline *oldest = NULL;
+  for (size_t i = 0; i < VULKAN_MAX_CUSTOM_PIPELINES; ++i) {
+    VULKAN_CustomPipeline *entry = &vulkan->custom_pipelines[i];
+    if (!entry->used)
+      return entry;
+    if (!oldest || entry->last_used_frame < oldest->last_used_frame)
+      oldest = entry;
+  }
+  if (oldest)
+    destroy_custom_pipeline_entry(vulkan, oldest);
+  return oldest;
+}
+
+int VULKAN_GetOrCreateCustomPipeline(VULKAN *vulkan, const BLB_ShaderProgram *shader, bool is_2d, BLB_RenderMode mode, uint32_t depth_variant,
+                                     VkPipeline *pipeline, VkPipelineLayout *layout) {
+  if (!vulkan || !shader || !pipeline || !layout || vulkan->device == VK_NULL_HANDLE || vulkan->render_pass == VK_NULL_HANDLE)
+    return -1;
+  if (!shader->vertex_code || !shader->fragment_code || shader->vertex_size == 0 || shader->fragment_size == 0)
+    return -1;
+  if (shader->asset.is_2d != is_2d)
+    return -1;
+  if (shader->asset.source_type != BLB_SHADER_SOURCE_SPIRV)
+    return -1;
+  if ((int)mode < (int)BLB_RENDER_OPAQUE || (int)mode >= (int)BLB_RENDER_MODE_COUNT || depth_variant >= VULKAN_DEPTH_VARIANTS)
+    return -1;
+
+  VULKAN_CustomPipeline *entry = find_custom_pipeline(vulkan, shader, is_2d, mode, depth_variant);
+  if (entry && entry->shader_revision != BLB_Shader_GetRevision(shader)) {
+    destroy_custom_pipeline_entry(vulkan, entry);
+    entry = NULL;
+  }
+
+  if (entry) {
+    entry->last_used_frame = vulkan->frame_serial;
+    *pipeline = entry->pipeline;
+    *layout = entry->layout;
+    return 0;
+  }
+
+  entry = find_custom_pipeline_slot(vulkan);
+  if (!entry)
+    return -1;
+
+  VkDescriptorSetLayout light_layout = is_2d ? vulkan->light_descriptor_set_layout_2d : vulkan->light_descriptor_set_layout_3d;
+  if (create_basic_pipeline(vulkan, shader->vertex_code, shader->vertex_size, shader->fragment_code, shader->fragment_size, light_layout,
+                            &entry->layout, &entry->pipeline, is_2d, mode, depth_variant) != 0) {
+    *entry = (VULKAN_CustomPipeline){0};
+    return -1;
+  }
+
+  entry->used = true;
+  entry->shader = shader;
+  entry->shader_revision = BLB_Shader_GetRevision(shader);
+  entry->last_used_frame = vulkan->frame_serial;
+  entry->is_2d = is_2d;
+  entry->render_mode = mode;
+  entry->depth_variant = depth_variant;
+  BLB_Shader_Retain((BLB_ShaderProgram *)shader);
+
+  *pipeline = entry->pipeline;
+  *layout = entry->layout;
+  return 0;
+}
+
+static int create_text_pipeline(VULKAN *vulkan, const void *vertex_code, size_t vertex_size, const void *fragment_code, size_t fragment_size,
+                                VkPipelineLayout *pipeline_layout, VkPipeline *pipeline, BLB_RenderMode mode, bool is_3d) {
+
+  VkShaderModule vert = BLB_LoadShaderFromMemory(vulkan, vertex_code, vertex_size);
+
+  VkShaderModule frag = BLB_LoadShaderFromMemory(vulkan, fragment_code, fragment_size);
+
+  if (vert == VK_NULL_HANDLE || frag == VK_NULL_HANDLE) {
+    if (vert != VK_NULL_HANDLE)
+      vkDestroyShaderModule(vulkan->device, vert, NULL);
+
+    if (frag != VK_NULL_HANDLE)
+      vkDestroyShaderModule(vulkan->device, frag, NULL);
+
+    return -1;
+  }
+
+  VkPipelineShaderStageCreateInfo stages[] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT,
+          .module = vert,
+          .pName = "main",
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .module = frag,
+          .pName = "main",
+      },
+  };
+
+  VkVertexInputBindingDescription binding = {
+      .binding = 0,
+      .stride = sizeof(VulkanTextVertex),
+      .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+  };
+
+  VkVertexInputAttributeDescription attributes[] = {
+      {
+          .location = 0,
+          .binding = 0,
+          .format = VK_FORMAT_R32G32B32_SFLOAT,
+          .offset = 0,
+      },
+      {
+          .location = 1,
+          .binding = 0,
+          .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+          .offset = sizeof(float) * 3,
+      },
+      {
+          .location = 2,
+          .binding = 0,
+          .format = VK_FORMAT_R32G32_SFLOAT,
+          .offset = sizeof(float) * 7,
+      },
+  };
+
+  VkPipelineVertexInputStateCreateInfo vertex_input = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+      .vertexBindingDescriptionCount = 1,
+      .pVertexBindingDescriptions = &binding,
+      .vertexAttributeDescriptionCount = 3,
+      .pVertexAttributeDescriptions = attributes,
+  };
+
+  VkPipelineInputAssemblyStateCreateInfo assembly = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+      .primitiveRestartEnable = VK_FALSE,
+  };
+
+  VkPipelineViewportStateCreateInfo viewport = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1,
+      .scissorCount = 1,
+  };
+
+  VkPipelineRasterizationStateCreateInfo raster = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .depthClampEnable = VK_FALSE,
+      .rasterizerDiscardEnable = VK_FALSE,
+      .polygonMode = VK_POLYGON_MODE_FILL,
+      .cullMode = VK_CULL_MODE_NONE,
+      .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+      .depthBiasEnable = VK_FALSE,
+      .lineWidth = 1.0f,
+  };
+
+  VkPipelineMultisampleStateCreateInfo multisample = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+  };
+
+  VkPipelineDepthStencilStateCreateInfo depth = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+      .depthTestEnable = VK_FALSE,
+      .depthWriteEnable = VK_FALSE,
+      .depthCompareOp = VK_COMPARE_OP_ALWAYS,
+      .depthBoundsTestEnable = VK_FALSE,
+      .stencilTestEnable = VK_FALSE,
+  };
+
+  VkPipelineColorBlendAttachmentState blend_attachment = {
+      .blendEnable = mode == BLB_RENDER_OPAQUE ? VK_FALSE : VK_TRUE,
+      .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+      .dstColorBlendFactor = mode == BLB_RENDER_ADDITIVE ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+      .colorBlendOp = VK_BLEND_OP_ADD,
+      .srcAlphaBlendFactor = mode == BLB_RENDER_ADDITIVE ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE,
+      .dstAlphaBlendFactor = mode == BLB_RENDER_ADDITIVE ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+      .alphaBlendOp = VK_BLEND_OP_ADD,
+      .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+  };
+
+  VkPipelineColorBlendStateCreateInfo blend = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+      .attachmentCount = 1,
+      .pAttachments = &blend_attachment,
+  };
+
+  VkDynamicState dynamic_states[] = {
+      VK_DYNAMIC_STATE_VIEWPORT,
+      VK_DYNAMIC_STATE_SCISSOR,
+  };
+
+  VkPipelineDynamicStateCreateInfo dynamic = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 2,
+      .pDynamicStates = dynamic_states,
+  };
+
+  uint32_t push_constant_size = is_3d ? sizeof(VulkanText3DPushConstants) : sizeof(VulkanTextPushConstants);
+
+  VkPushConstantRange push_constant = {
+      .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+      .offset = 0,
+      .size = push_constant_size,
+  };
+
+  VkPipelineLayoutCreateInfo layout = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1,
+      .pSetLayouts = &vulkan->text_descriptor_set_layout,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges = &push_constant,
+  };
+
+  if (vkCreatePipelineLayout(vulkan->device, &layout, NULL, pipeline_layout) != VK_SUCCESS) {
+    vkDestroyShaderModule(vulkan->device, vert, NULL);
+    vkDestroyShaderModule(vulkan->device, frag, NULL);
+    return -1;
+  }
+
+  VkGraphicsPipelineCreateInfo pipeline_info = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .stageCount = 2,
+      .pStages = stages,
+      .pVertexInputState = &vertex_input,
+      .pInputAssemblyState = &assembly,
+      .pViewportState = &viewport,
+      .pRasterizationState = &raster,
+      .pMultisampleState = &multisample,
+      .pDepthStencilState = &depth,
+      .pColorBlendState = &blend,
+      .pDynamicState = &dynamic,
+      .layout = *pipeline_layout,
+      .renderPass = vulkan->render_pass,
+      .subpass = 0,
+  };
+
+  VkResult result = vkCreateGraphicsPipelines(vulkan->device, VK_NULL_HANDLE, 1, &pipeline_info, NULL, pipeline);
+
+  vkDestroyShaderModule(vulkan->device, vert, NULL);
+  vkDestroyShaderModule(vulkan->device, frag, NULL);
+
+  if (result != VK_SUCCESS) {
+    vkDestroyPipelineLayout(vulkan->device, *pipeline_layout, NULL);
+
+    *pipeline_layout = VK_NULL_HANDLE;
+
+    return -1;
+  }
+
+  return 0;
+}
+
+int create_shadow_pipeline(VULKAN *vulkan) {
+  if (!vulkan || vulkan->device == VK_NULL_HANDLE)
+    return -1;
+
+  VkShaderModule vert = BLB_LoadShaderFromMemory(vulkan, blb_shader_shadow_vert, blb_shader_shadow_vert_size);
+
+  if (vert == VK_NULL_HANDLE)
+    return -1;
+
+  VkPipelineShaderStageCreateInfo stage = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .stage = VK_SHADER_STAGE_VERTEX_BIT,
+      .module = vert,
+      .pName = "main",
+  };
+
+  VkVertexInputBindingDescription binding = {
+      .binding = 0,
+      .stride = sizeof(VulkanShadowVertex),
+      .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+  };
+
+  VkVertexInputAttributeDescription attribute = {
+      .location = 0,
+      .binding = 0,
+      .format = VK_FORMAT_R32G32B32_SFLOAT,
+      .offset = 0,
+  };
+
+  VkPipelineVertexInputStateCreateInfo vertex_input = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+      .vertexBindingDescriptionCount = 1,
+      .pVertexBindingDescriptions = &binding,
+      .vertexAttributeDescriptionCount = 1,
+      .pVertexAttributeDescriptions = &attribute,
+  };
+
+  VkPipelineInputAssemblyStateCreateInfo assembly = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+      .primitiveRestartEnable = VK_FALSE,
+  };
+
+  VkPipelineViewportStateCreateInfo viewport = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1,
+      .pViewports = NULL,
+      .scissorCount = 1,
+      .pScissors = NULL,
+  };
+
+  VkPipelineRasterizationStateCreateInfo raster = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .depthClampEnable = VK_FALSE,
+      .rasterizerDiscardEnable = VK_FALSE,
+      .polygonMode = VK_POLYGON_MODE_FILL,
+      .cullMode = VK_CULL_MODE_BACK_BIT,
+      .frontFace = VK_FRONT_FACE_CLOCKWISE,
+      .depthBiasEnable = VK_FALSE,
+      .lineWidth = 1.0f,
+  };
+
+  VkPipelineMultisampleStateCreateInfo multisample = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+  };
+
+  VkPipelineDepthStencilStateCreateInfo depth = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+      .depthTestEnable = VK_TRUE,
+      .depthWriteEnable = VK_TRUE,
+      .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+      .depthBoundsTestEnable = VK_FALSE,
+      .stencilTestEnable = VK_FALSE,
+  };
+
+  VkDynamicState dynamic_states[] = {
+      VK_DYNAMIC_STATE_VIEWPORT,
+      VK_DYNAMIC_STATE_SCISSOR,
+  };
+
+  VkPipelineDynamicStateCreateInfo dynamic = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 2,
+      .pDynamicStates = dynamic_states,
+  };
+
+  VkPushConstantRange push_constant = {
+      .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+      .offset = 0,
+      .size = sizeof(VulkanShadowPushConstants),
+  };
+
+  VkPipelineLayoutCreateInfo layout = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1,
+      .pSetLayouts = &vulkan->light_descriptor_set_layout_3d,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges = &push_constant,
+  };
+
+  if (vkCreatePipelineLayout(vulkan->device, &layout, NULL, &vulkan->shadow_pipeline_layout) != VK_SUCCESS) {
+    vkDestroyShaderModule(vulkan->device, vert, NULL);
+    return -1;
+  }
+
+  VkGraphicsPipelineCreateInfo info = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .stageCount = 1,
+      .pStages = &stage,
+      .pVertexInputState = &vertex_input,
+      .pInputAssemblyState = &assembly,
+      .pViewportState = &viewport,
+      .pRasterizationState = &raster,
+      .pMultisampleState = &multisample,
+      .pDepthStencilState = &depth,
+      .pDynamicState = &dynamic,
+      .layout = vulkan->shadow_pipeline_layout,
+      .renderPass = vulkan->shadow_render_pass,
+      .subpass = 0,
+  };
+
+  VkResult result = vkCreateGraphicsPipelines(vulkan->device, VK_NULL_HANDLE, 1, &info, NULL, &vulkan->shadow_pipeline);
+
+  vkDestroyShaderModule(vulkan->device, vert, NULL);
+
+  if (result != VK_SUCCESS) {
+    vkDestroyPipelineLayout(vulkan->device, vulkan->shadow_pipeline_layout, NULL);
+
+    vulkan->shadow_pipeline_layout = VK_NULL_HANDLE;
+
+    return -1;
+  }
+
+  return 0;
+}
+
+int create_pipelines(VULKAN *vulkan) {
+  if (!vulkan)
+    return -1;
+
+  if (create_shadow_pipeline(vulkan) != 0)
+    return -1;
+
+  for (int mode = 0; mode < BLB_RENDER_MODE_COUNT; mode++) {
+    for (uint32_t variant = 0; variant < VULKAN_DEPTH_VARIANTS; ++variant) {
+      if (create_basic_pipeline(vulkan, blb_shader_basic3d_vert, blb_shader_basic3d_vert_size, blb_shader_basic3d_frag, blb_shader_basic3d_frag_size,
+                                vulkan->light_descriptor_set_layout_3d, &vulkan->pipeline_layout_3d[mode][variant],
+                                &vulkan->pipeline_3d[mode][variant], false, (BLB_RenderMode)mode, variant) != 0)
+        return -1;
+
+      if (create_basic_pipeline(vulkan, blb_shader_basic2d_vert, blb_shader_basic2d_vert_size, blb_shader_basic2d_frag, blb_shader_basic2d_frag_size,
+                                vulkan->light_descriptor_set_layout_2d, &vulkan->pipeline_layout_2d[mode][variant],
+                                &vulkan->pipeline_2d[mode][variant], true, (BLB_RenderMode)mode, variant) != 0)
+        return -1;
+    }
+
+    if (create_text_pipeline(vulkan, blb_shader_text3d_vert, blb_shader_text3d_vert_size, blb_shader_text3d_frag, blb_shader_text3d_frag_size,
+                             &vulkan->text_pipeline_layout_3d[mode], &vulkan->text_pipeline_3d[mode], (BLB_RenderMode)mode, true) != 0)
+      return -1;
+
+    if (create_text_pipeline(vulkan, blb_shader_text2d_vert, blb_shader_text2d_vert_size, blb_shader_text2d_frag, blb_shader_text2d_frag_size,
+                             &vulkan->text_pipeline_layout_2d[mode], &vulkan->text_pipeline_2d[mode], (BLB_RenderMode)mode, false) != 0)
+      return -1;
+  }
+
+  return 0;
+}
+
+int create_text_descriptor_layout(VULKAN *vulkan) {
+  VkDescriptorSetLayoutBinding binding = {
+      .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT};
+
+  VkDescriptorSetLayoutCreateInfo info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &binding};
+
+  if (vkCreateDescriptorSetLayout(vulkan->device, &info, NULL, &vulkan->text_descriptor_set_layout) != VK_SUCCESS)
+    return -1;
+
+  return 0;
+}
