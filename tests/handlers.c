@@ -76,7 +76,7 @@ static void handler_hold(const BLB_ObjectEvent *event, void *userdata) {
 int BLB_TestHandlers(void) {
   BLB_TestContext app;
 
-  if (BLB_TestContext_Init(&app, 1200, 900, "BulbaEngine - Object Handlers", HMM_V3(0.0f, 0.0f, 12.0f), 9, 11, 16) != 0)
+  if (BLB_TestContext_Init(&app, 1200, 900, "BulbaEngine - Object Handlers Test", HMM_V3(0.0f, 0.0f, 12.0f), 9, 11, 16) != 0)
     return -1;
 
   BLB_TestContext_AddLight(&app, BLB_LIGHT_POINT, HMM_V3(-3.0f, 5.0f, 8.0f), HMM_V3(0.0f, 0.0f, 0.0f), 18.0f, 0.03f, 1.0f, 30.0f);
