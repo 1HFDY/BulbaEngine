@@ -3161,15 +3161,16 @@ static void draw_render_objects(BLB_Scene *scene, BLB_Renderer *renderer, BLB_Re
                                   viewport_width, viewport_height)) {
 
         draw_object2d(scene->audio2d[indices[5]]->obj, renderer, scene->camera->camera_cache);
-        if (scene->audio2d[indices[5]]->play) {
-          if (scene->audio2d[indices[5]]->surround)
-            audio2d_surround_play(scene->audio2d[indices[5]]);
-          else
-            audio2d_play(scene->audio2d[indices[5]]);
-        } else {
+        if (scene->audio2d[indices[5]]->play)
+          BLB_Object2D_SetTexture(scene->audio2d[indices[5]]->obj, scene->audio2d[indices[5]]->audio_debug_texture);
+        else
           BLB_Object2D_SetTexture(scene->audio2d[indices[5]]->obj, scene->audio2d[indices[5]]->audio_off_debug_texture);
-        }
       }
+
+      if (scene->audio2d[indices[5]]->surround)
+        audio2d_surround_play(scene->audio2d[indices[5]]);
+      else
+        audio2d_play(scene->audio2d[indices[5]]);
       break;
 
     case 6:
@@ -3178,16 +3179,15 @@ static void draw_render_objects(BLB_Scene *scene, BLB_Renderer *renderer, BLB_Re
 
         draw_object3d(scene->audio3d[indices[6]]->obj, renderer, scene->camera->camera_cache, scene->camera->position);
 
-        if (scene->audio3d[indices[6]]->play) {
+        if (scene->audio3d[indices[6]]->play)
           BLB_Object3D_SetTexture(scene->audio3d[indices[6]]->obj, scene->audio3d[indices[6]]->audio_debug_texture);
-          if (scene->audio3d[indices[6]]->surround)
-            audio3d_surround_play(scene->audio3d[indices[6]]);
-          else
-            audio3d_play(scene->audio3d[indices[6]]);
-        } else {
+        else
           BLB_Object3D_SetTexture(scene->audio3d[indices[6]]->obj, scene->audio3d[indices[6]]->audio_off_debug_texture);
-        }
       }
+      if (scene->audio3d[indices[6]]->surround)
+        audio3d_surround_play(scene->audio3d[indices[6]]);
+      else
+        audio3d_play(scene->audio3d[indices[6]]);
       break;
     }
 

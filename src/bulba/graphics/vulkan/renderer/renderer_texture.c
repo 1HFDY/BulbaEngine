@@ -90,6 +90,7 @@ static int begin_single_time_commands(VULKAN *vulkan, VkCommandBuffer *command) 
     return -1;
 
   VkCommandBufferBeginInfo begin_info = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+
   if (vkBeginCommandBuffer(*command, &begin_info) != VK_SUCCESS) {
     vkFreeCommandBuffers(vulkan->device, vulkan->command_pool, 1, command);
 
@@ -109,6 +110,7 @@ static int end_single_time_commands(VULKAN *vulkan, VkCommandBuffer command) {
   VkSubmitInfo submit_info = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &command};
 
   VkResult result = vkQueueSubmit(vulkan->graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+
   if (result == VK_SUCCESS)
     result = vkQueueWaitIdle(vulkan->graphics_queue);
 
@@ -144,6 +146,7 @@ static int transition_image(VULKAN *vulkan, VkImage image, VkImageLayout old_lay
     destination_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
   } else if (old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
     source_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -151,16 +154,20 @@ static int transition_image(VULKAN *vulkan, VkImage image, VkImageLayout old_lay
     destination_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
   } else {
     vkEndCommandBuffer(command);
+
     vkFreeCommandBuffers(vulkan->device, vulkan->command_pool, 1, &command);
+
     return -1;
   }
 
   vkCmdPipelineBarrier(command, source_stage, destination_stage, 0, 0, NULL, 0, NULL, 1, &barrier);
+
   return end_single_time_commands(vulkan, command);
 }
 
 static int copy_buffer_to_image(VULKAN *vulkan, VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
   VkCommandBuffer command = VK_NULL_HANDLE;
+
   if (begin_single_time_commands(vulkan, &command) != 0)
     return -1;
 
